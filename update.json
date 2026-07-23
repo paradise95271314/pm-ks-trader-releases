@@ -1,6 +1,6 @@
 {
   "version": "1.3.1",
   "url": "https://github.com/paradise95271314/pm-ks-trader-releases/releases/download/v1.3.1/PM-KS-Trader-Setup.exe",
-  "sha256": "33226edf773938cb051195c14e0ff3e142e6eeb15b0940de0318706e9ab1b62a",
-  "notes": "v1.3.1: 强制刷新 v1.3.0 修复（清理无用调试输出，新增整点前后8分钟不下单保护）"
+  "sha256": "d7ab24aa047d9cfb0011267b5cc8a225369406c126900b82393501ddbd3cb143",
+  "notes": "PM-KS Trader v1.3.1"
 }
