@@ -1,6 +1,6 @@
 {
-  "version": "1.4.2",
-  "url": "https://github.com/paradise95271314/pm-ks-trader-releases/releases/download/v1.4.2/PM-KS-Trader-Setup.exe",
-  "sha256": "f8a421e55372cdc01897b8fc3a95b30102bc661835d7ad28a5bce74a2aacd9a2",
-  "notes": "修复 Kalshi WebSocket 连接 403：端点改为 api.elections.kalshi.com；新增 on_error 回调和前端错误展示"
+  "version": "1.4.3",
+  "url": "https://github.com/paradise95271314/pm-ks-trader-releases/releases/download/v1.4.3/PM-KS-Trader-Setup.exe",
+  "sha256": "641b4c81b0b5db3d7c9b42548c512c214a924b10fe7e2452c260d331809dd923",
+  "notes": "BTC行情改用Polymarket与Kalshi官方WebSocket推送；扫描和下单不再主动轮询盘口；面板500ms显示推送连接与同步差；推送断线或丢序时停止交易。"
 }
