@@ -20,6 +20,7 @@ permissions:
 
 jobs:
   build-and-publish:
+    if: github.repository == 'paradise95271314/pm-ks-trader-source'
     runs-on: windows-latest
     env:
       APP_VERSION: ${{ inputs.version || github.ref_name }}
@@ -109,6 +110,30 @@ jobs:
           }
           $manifest | ConvertTo-Json | Set-Content 'output\update.json' -Encoding utf8
 
+      - name: Publish installer to public repository
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+        run: |
+          gh release create "v$env:APP_VERSION" 'output\PM-KS-Trader-Setup.exe#PM-KS-Trader-Setup.exe' --repo $env:RELEASE_REPO --target main --title "PM-KS Trader v$env:APP_VERSION" --notes "$env:RELEASE_NOTES"
+
+      - name: Verify published installer
+        shell: pwsh
+        run: |
+          $published = Join-Path $env:RUNNER_TEMP 'PM-KS-Trader-Setup.exe'
+          for ($attempt = 1; $attempt -le 5; $attempt++) {
+            try {
+              Invoke-WebRequest -Uri "https://github.com/$env:RELEASE_REPO/releases/download/v$env:APP_VERSION/PM-KS-Trader-Setup.exe" -OutFile $published
+              break
+            } catch {
+              if ($attempt -eq 5) { throw }
+              Start-Sleep -Seconds 3
+            }
+          }
+          $builtSha = (Get-FileHash 'output\PM-KS-Trader-Setup.exe' -Algorithm SHA256).Hash
+          $publishedSha = (Get-FileHash $published -Algorithm SHA256).Hash
+          if ($publishedSha -ne $builtSha) { throw 'Published installer SHA-256 does not match the build output' }
+
       - name: Publish update.json
         shell: pwsh
         env:
@@ -123,13 +148,6 @@ jobs:
           git commit -m "Publish update $env:APP_VERSION"
           git push origin HEAD:main
           Pop-Location
-
-      - name: Publish installer to public repository
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
-        run: |
-          gh release create "v$env:APP_VERSION" 'output\PM-KS-Trader-Setup.exe#PM-KS-Trader-Setup.exe' --repo $env:RELEASE_REPO --target main --title "PM-KS Trader v$env:APP_VERSION" --notes "$env:RELEASE_NOTES"
 
       - name: Keep installer as workflow artifact
         uses: actions/upload-artifact@v4
