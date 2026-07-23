@@ -1,6 +1,6 @@
 {
   "version": "1.3.2",
   "url": "https://github.com/paradise95271314/pm-ks-trader-releases/releases/download/v1.3.2/PM-KS-Trader-Setup.exe",
-  "sha256": "bba07a8c33b32bc614bd74dbf8d454915fed09a84818ab23320f6ef8477c267c",
-  "notes": "v1.3.2: 降低轮询最小间隔至100ms（原2秒），大幅提升BTC套利捕捉速度"
+  "sha256": "1c9d7125ace05f5638e378cda2b81ab6785558ea3a24dedf47a2c799ea802227",
+  "notes": "PM-KS Trader v1.3.2"
 }
