@@ -1,5 +1,5 @@
 "use client"
-import { useCallback, useEffect, useMemo, useState, useRef } from "react"
+import { useCallback, useEffect, useState, useRef } from "react"
 import { Activity, Shield, Wallet, Play, Square, TrendingUp, TrendingDown, Settings, KeyRound, HandCoins, X, TestTube2, Gamepad2 } from "lucide-react"
 interface AutoStatus { enabled: boolean; cooldown_remaining: number; trade_count: number; last_trade_result: any }
 interface ArbCheck { kalshi_strike: number; type: string; poly_leg: string; kalshi_leg: string; poly_cost: number; kalshi_cost: number; total_cost: number; is_arbitrage: boolean; margin: number; ks_ticker?: string }
@@ -18,7 +18,7 @@ interface HistoryEntry {
   ks_ticker?: string; ks_side?: string
 }
 interface BuyResult { success: boolean; error?: string; pm?: any; ks?: any; balances?: any; pm_plan?: any; ks_plan?: any }
-interface CoinData { polymarket: any; kalshi: any; checks: any[]; opportunities: ArbCheck[]; errors: string[] }
+interface CoinData { polymarket: any; kalshi: any; checks: ArbCheck[]; opportunities: ArbCheck[]; best_check?: ArbCheck | null; errors: string[] }
 interface MarketData { timestamp: string; coins: Record<string, CoinData>; errors: string[] }
 interface BalData { pm: number | null; ks: number | null; pm_error?: string; ks_error?: string }
 interface EsportsOpportunity {
@@ -28,8 +28,8 @@ interface EsportsOpportunity {
 }
 interface EsportsData { time: string; matched_markets: number; opportunities: EsportsOpportunity[]; total: number; error?: string }
 const API = process.env.NEXT_PUBLIC_API_URL ?? ""
-const COIN_ORDER = ["BTC", "ETH"]
-const COIN_NAMES: Record<string, string> = { BTC: "Bitcoin", ETH: "Ethereum" }
+const COIN_ORDER = ["BTC"]
+const COIN_NAMES: Record<string, string> = { BTC: "Bitcoin" }
 function StatChip({ icon, title, value, sub }: { icon: React.ReactNode; title: string; value: string; sub: string }) {
   return (
     <div className="rounded-xl border border-blue-500/20 bg-[#071120] px-3 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
@@ -52,7 +52,8 @@ function CoinPanel({ symbol, data, onBuy, buying }: {
 }) {
   const poly = data.polymarket
   const kalshi = data.kalshi
-  const best = data.opportunities.length ? data.opportunities.reduce((p, c) => p.margin > c.margin ? p : c) : null
+  const best = data.best_check || null
+  const bestCents = best ? best.margin * 100 : null
   const hasData = poly && kalshi
   return (
     <div className="rounded-2xl border border-blue-500/20 bg-[#071120] p-4 text-white">
@@ -63,7 +64,10 @@ function CoinPanel({ symbol, data, onBuy, buying }: {
         </div>
         <div className="text-right">
           <div className="text-xs text-slate-400">最佳利润</div>
-          <div className="text-2xl font-bold text-emerald-400">{best ? `+${best.margin.toFixed(3)}` : "--"}</div>
+          <div className={`text-2xl font-bold ${bestCents == null ? "text-slate-400" : bestCents > 0 ? "text-emerald-400" : "text-amber-300"}`}>
+            {bestCents == null ? "--" : `${bestCents > 0 ? "+" : ""}${bestCents.toFixed(1)}¢`}
+          </div>
+          <div className="mt-1 text-[10px] text-slate-500">本轮检查 {data.checks.length} 组</div>
         </div>
       </div>
       {data.errors.length > 0 && (
@@ -79,6 +83,7 @@ function CoinPanel({ symbol, data, onBuy, buying }: {
           <div className="grid grid-cols-2 gap-3">
             <div className="rounded-xl border border-blue-500/15 bg-[#0b1729] p-3">
               <div className="mb-2 text-xs uppercase tracking-wide text-slate-400">Polymarket</div>
+              <div className="mb-2 truncate font-mono text-[10px] text-slate-500" title={poly?.slug}>{poly?.slug || "未识别市场"}</div>
               <div className="space-y-1.5 text-sm">
                 <div className="flex justify-between"><span className="text-slate-400">阈值</span><span className="font-mono text-white">{poly?.price_to_beat?.toLocaleString() ?? "--"}</span></div>
                 <div className="flex justify-between"><span className="text-slate-400">现价</span><span className="font-mono text-white">{poly?.current_price?.toLocaleString() ?? "--"}</span></div>
@@ -87,6 +92,7 @@ function CoinPanel({ symbol, data, onBuy, buying }: {
             </div>
             <div className="rounded-xl border border-blue-500/15 bg-[#0b1729] p-3">
               <div className="mb-2 text-xs uppercase tracking-wide text-slate-400">Kalshi</div>
+              <div className="mb-2 truncate font-mono text-[10px] text-slate-500" title={kalshi?.event_ticker}>{kalshi?.event_ticker || "未识别市场"}</div>
               <div className="space-y-1.5 text-xs font-mono">
                 {[...(kalshi?.markets || [])].sort((a: any, b: any) => Math.abs(a.strike - (poly?.price_to_beat || 0)) - Math.abs(b.strike - (poly?.price_to_beat || 0))).slice(0, 3).map((m: any, i: number) => (
                   <div key={i} className="flex justify-between border-b border-blue-500/10 pb-1 last:border-0 last:pb-0">
@@ -122,6 +128,24 @@ function CoinPanel({ symbol, data, onBuy, buying }: {
         </div>
       )}
     </div>
+  )
+}
+function EsportsPanel({ data, loading, autoEnabled, onOpen }: { data: EsportsData | null; loading: boolean; autoEnabled: boolean; onOpen: () => void }) {
+  const best = data?.opportunities?.[0] || null
+  return (
+    <button onClick={onOpen} className="rounded-2xl border border-violet-500/25 bg-[#071120] p-4 text-left text-white hover:bg-violet-500/10">
+      <div className="mb-3 flex items-center justify-between">
+        <div><div className="flex items-center gap-2 text-2xl font-bold"><Gamepad2 className="h-5 w-5 text-violet-300" />电竞双边套利</div><div className="mt-1 text-xs text-slate-400">整场胜负盘 / PM + KS 同时下单</div></div>
+        <span className={`rounded-full px-2 py-1 text-xs ${autoEnabled ? "bg-emerald-500/15 text-emerald-400" : "bg-slate-500/15 text-slate-400"}`}>{autoEnabled ? "自动运行中" : "自动关闭"}</span>
+      </div>
+      <div className="mb-3 grid grid-cols-3 gap-2">
+        <div className="rounded-xl bg-[#0b1729] p-3"><div className="text-[10px] text-slate-400">已匹配赛事</div><div className="mt-1 font-mono text-xl font-bold">{data?.matched_markets ?? "--"}</div></div>
+        <div className="rounded-xl bg-[#0b1729] p-3"><div className="text-[10px] text-slate-400">达标机会</div><div className={`mt-1 font-mono text-xl font-bold ${(data?.total || 0) > 0 ? "text-emerald-400" : "text-slate-300"}`}>{data?.total ?? "--"}</div></div>
+        <div className="rounded-xl bg-[#0b1729] p-3"><div className="text-[10px] text-slate-400">最佳利润</div><div className="mt-1 font-mono text-xl font-bold text-violet-300">{best ? `+${best.estimated_profit_cents.toFixed(1)}¢` : "--"}</div></div>
+      </div>
+      {loading && !data ? <div className="rounded-xl border border-dashed border-violet-500/20 px-3 py-5 text-center text-xs text-slate-400">正在匹配电竞市场...</div> : data?.error ? <div className="rounded-xl bg-red-500/10 px-3 py-3 text-xs text-rose-300">{data.error}</div> : best ? <div className="rounded-xl border border-emerald-500/15 bg-emerald-500/10 px-3 py-3 text-xs"><div className="truncate font-semibold text-white">{best.title}</div><div className="mt-2 flex flex-wrap gap-x-3 gap-y-1"><span className="text-blue-300">PM {best.pm_team} {(best.pm_price * 100).toFixed(1)}¢</span><span className="text-emerald-300">KS {best.ks_team} {(best.ks_price * 100).toFixed(1)}¢</span></div></div> : <div className="rounded-xl border border-dashed border-violet-500/20 px-3 py-5 text-center text-xs text-slate-500">当前没有达到利润阈值的机会</div>}
+      <div className="mt-3 text-center text-xs font-semibold text-violet-300">点击查看全部电竞市场与下单设置</div>
+    </button>
   )
 }
 export default function Dashboard() {
@@ -169,9 +193,11 @@ export default function Dashboard() {
   const [esportsLoading, setEsportsLoading] = useState(false)
   const [esportsExecuting, setEsportsExecuting] = useState(false)
   const [updateInfo, setUpdateInfo] = useState<any>(null)
+  const [currentVersion, setCurrentVersion] = useState("")
   const [updateChecking, setUpdateChecking] = useState(false)
   const [showUpdate, setShowUpdate] = useState(false)
   const logEndRef = useRef<HTMLDivElement>(null)
+  const refreshInFlightRef = useRef(false)
   const fetchLog = useCallback(async () => {
     try {
       const r = await fetch(API + "/log?lines=80")
@@ -224,6 +250,8 @@ export default function Dashboard() {
     setHistoryLoading(false)
   }, [])
   const fetchAll = useCallback(async () => {
+    if (refreshInFlightRef.current) return
+    refreshInFlightRef.current = true
     const fetchJson = async (path: string, timeoutMs = 10000) => {
       const controller = new AbortController()
       const timer = window.setTimeout(() => controller.abort(), timeoutMs)
@@ -246,7 +274,10 @@ export default function Dashboard() {
       if (ap) setPositions(ap.positions || [])
       if (!ar) setConnected(false)
     } catch { setConnected(false) }
-    finally { setLoading(false) }
+    finally {
+      refreshInFlightRef.current = false
+      setLoading(false)
+    }
   }, [])
   useEffect(() => {
     fetchAll()
@@ -353,18 +384,26 @@ export default function Dashboard() {
     }
     setCredentialImporting(false)
   }
-  const checkForUpdate = async () => {
+  const checkForUpdate = async (openDialog = true) => {
     setUpdateChecking(true)
     try {
       const response = await fetch(API + "/update/check")
-      setUpdateInfo(await response.json())
-      setShowUpdate(true)
+      const info = await response.json()
+      setUpdateInfo(info)
+      if (info.current_version) setCurrentVersion(info.current_version)
+      if (openDialog) setShowUpdate(true)
     } catch (e: any) {
       setUpdateInfo({ available: false, error: e.message || "检查更新失败" })
-      setShowUpdate(true)
+      if (openDialog) setShowUpdate(true)
     }
     setUpdateChecking(false)
   }
+  useEffect(() => {
+    fetch(API + "/version").then(r => r.json()).then(info => setCurrentVersion(info.version || "")).catch(() => {})
+    const timer = window.setTimeout(() => { void checkForUpdate(false) }, 3000)
+    const interval = window.setInterval(() => { void checkForUpdate(false) }, 30 * 60 * 1000)
+    return () => { window.clearTimeout(timer); window.clearInterval(interval) }
+  }, [])
   const applyUpdate = async () => {
     if (!updateInfo) return
     const response = await fetch(API + "/update/apply", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ update: updateInfo }) })
@@ -386,9 +425,14 @@ export default function Dashboard() {
   useEffect(() => {
     if (!showEsports) return
     fetchEsports()
-    const id = setInterval(fetchEsports, 5000)
+    const id = setInterval(fetchEsports, 10000)
     return () => clearInterval(id)
   }, [showEsports, fetchEsports])
+  useEffect(() => {
+    const timer = window.setTimeout(fetchEsports, 5000)
+    const id = window.setInterval(fetchEsports, 120 * 1000)
+    return () => { window.clearTimeout(timer); window.clearInterval(id) }
+  }, [fetchEsports])
   const toggleEsportsAuto = async () => {
     const action = esportsAuto?.enabled ? "stop" : "start"
     await fetch(API + "/esports/auto/" + action, { method: "POST" }).catch(() => {})
@@ -412,8 +456,6 @@ export default function Dashboard() {
   }
   const coins = data?.coins || {}
   const coinKeys = COIN_ORDER.filter(k => k in coins)
-  const allOpps = useMemo(() => coinKeys.flatMap(sym => (coins[sym]?.opportunities || []).map((opp: ArbCheck) => ({ sym, ...opp }))).sort((a, b) => b.margin - a.margin).slice(0, 6), [coinKeys, coins])
-  const totalErrors = (data?.errors?.length || 0) + coinKeys.reduce((n, sym) => n + (coins[sym]?.errors?.length || 0), 0)
   const manualChecks = (data?.coins?.[manualCoin]?.checks || []).filter((c: ArbCheck) => c.kalshi_strike && c.poly_leg && c.kalshi_leg)
   const manualChoice = manualChecks[manualIndex] || manualChecks[0]
   if (loading) return <div className="flex h-screen items-center justify-center bg-[#030712] text-slate-300">连接中...</div>
@@ -423,7 +465,7 @@ export default function Dashboard() {
         <aside className="flex min-h-0 flex-col overflow-y-auto rounded-[28px] border border-blue-500/20 bg-[#040b17]/95 p-4 shadow-[0_0_40px_rgba(30,64,175,0.12)] xl:p-5" style={{scrollbarWidth:"thin"}}>
           <div>
             <div className="text-[22px] font-bold tracking-tight text-white">Polymarket <span className="bg-gradient-to-r from-blue-400 to-cyan-300 bg-clip-text text-transparent">套利监控</span></div>
-            <div className="mt-2 text-sm text-slate-400">BTC / ETH 实时套利面板</div>
+            <div className="mt-2 flex items-center justify-between gap-2 text-sm text-slate-400"><span>BTC / 电竞 双边套利面板</span><span className="rounded-full border border-blue-500/20 bg-blue-500/10 px-2 py-0.5 font-mono text-[11px] text-blue-200">v{currentVersion || "--"}</span></div>
           </div>
           <div className="mt-6 space-y-3">
             <button className="flex w-full items-center gap-3 rounded-2xl border border-blue-500/30 bg-gradient-to-r from-blue-600/30 to-cyan-500/20 px-4 py-3 text-left text-white">
@@ -441,9 +483,10 @@ export default function Dashboard() {
                 <div className="text-xs text-slate-400">份额 / 阀值 / 冷却参数</div>
               </div>
             </button>
-            <button className="mb-3 flex w-full items-center gap-3 rounded-2xl border border-cyan-500/20 bg-[#071120] px-4 py-3 text-left text-white hover:bg-cyan-500/10" onClick={checkForUpdate} disabled={updateChecking}>
+            <button className="relative mb-3 flex w-full items-center gap-3 rounded-2xl border border-cyan-500/20 bg-[#071120] px-4 py-3 text-left text-white hover:bg-cyan-500/10" onClick={() => checkForUpdate(true)} disabled={updateChecking}>
+              {updateInfo?.available && <span className="absolute right-3 top-3 flex items-center gap-1 rounded-full bg-red-500 px-1.5 py-0.5 text-[9px] font-bold text-white shadow-[0_0_12px_rgba(239,68,68,0.7)]"><span className="h-1.5 w-1.5 rounded-full bg-white" />NEW</span>}
               <TrendingUp className="h-5 w-5 text-cyan-300" />
-              <div><div className="text-sm font-semibold">检查软件更新</div><div className="text-xs text-slate-400">{updateChecking ? "检查中..." : "在线检查并安装新版"}</div></div>
+              <div><div className="text-sm font-semibold">软件更新</div><div className="text-xs text-slate-400">{updateChecking ? "检查中..." : updateInfo?.available ? `发现新版 v${updateInfo.latest_version}` : "在线检查并安装新版"}</div></div>
             </button>
             <button className="mb-2 flex w-full items-center gap-3 rounded-2xl border border-amber-500/20 bg-[#071120] px-4 py-3 text-left text-white hover:bg-amber-500/10" onClick={() => setShowCredentials(true)}>
               <KeyRound className="h-5 w-5 text-amber-300" />
@@ -459,7 +502,8 @@ export default function Dashboard() {
                 <div className="text-xs text-slate-400">选择市场、方向和份数</div>
               </div>
             </button>
-            <button className="mb-3 flex w-full items-center gap-3 rounded-2xl border border-violet-500/25 bg-[#071120] px-4 py-3 text-left text-white hover:bg-violet-500/10" onClick={() => setShowEsports(true)}>
+            <button className="relative mb-3 flex w-full items-center gap-3 rounded-2xl border border-violet-500/25 bg-[#071120] px-4 py-3 text-left text-white hover:bg-violet-500/10" onClick={() => setShowEsports(true)}>
+              {(esportsData?.total || 0) > 0 && <span className="absolute right-3 top-3 flex h-5 min-w-5 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-bold text-white">{esportsData?.total}</span>}
               <Gamepad2 className="h-5 w-5 text-violet-300" />
               <div>
                 <div className="text-sm font-semibold">电竞双边套利</div>
@@ -497,12 +541,11 @@ export default function Dashboard() {
             <StatChip icon={<Shield className="h-4 w-4" />} title="Kalshi" value={bal?.ks != null ? "$" + bal.ks.toFixed(2) : "--"} sub={bal?.ks_error ? "错误" : "可用余额"} />
           </section>
           <section className="grid min-h-0 grid-cols-2 gap-4">
-            {coinKeys.map(sym => (
-              <CoinPanel key={sym} symbol={sym} data={coins[sym]} onBuy={buyArbitrage} buying={buying} />
-            ))}
+            {coins.BTC && <CoinPanel symbol="BTC" data={coins.BTC} onBuy={buyArbitrage} buying={buying} />}
+            <EsportsPanel data={esportsData} loading={esportsLoading} autoEnabled={!!esportsAuto?.enabled} onOpen={() => setShowEsports(true)} />
           </section>
-          <section className="grid min-h-0 grid-cols-2 gap-4">
-            {["BTC", "ETH"].map(coin => {
+          <section className="grid min-h-0 grid-cols-1 gap-4">
+            {["BTC"].map(coin => {
               const coinPositions = positions.filter(p => p.coin === coin)
               return (
                 <div key={coin} className="rounded-[28px] border border-blue-500/20 bg-[#040b17]/95 p-5">
@@ -528,30 +571,32 @@ export default function Dashboard() {
                             const up = p.poly_leg.toLowerCase() === "up"
                             const pmQty = p.pm_remaining ?? p.hedged_qty
                             const ksQty = p.ks_remaining ?? p.hedged_qty
-                            const pmTotal = (p.pm_price * pmQty).toFixed(2)
-                            const ksTotal = (p.ks_price * ksQty).toFixed(2)
+                            const pmTotal = (p.pm_price * pmQty).toFixed(3)
+                            const ksTotal = (p.ks_price * ksQty).toFixed(3)
                             return [
+                              pmQty > 0.01 ? (
                               <tr key={i+"pm"} className="border-b border-blue-500/5 hover:bg-blue-500/5">
                                 <td className="py-2 pr-2"><span className="rounded bg-blue-500/15 px-1.5 py-0.5 text-[11px] text-blue-300">PM</span></td>
                                 <td className="py-2 pr-2"><span className={up ? "text-emerald-400" : "text-rose-400"}>{p.poly_leg}</span></td>
-                                <td className="py-2 pr-2 text-right font-mono text-white">{p.pm_price.toFixed(2)}</td>
+                                <td className="py-2 pr-2 text-right font-mono text-white">{p.pm_price.toFixed(3)}</td>
                                 <td className="py-2 pr-2 text-right font-mono text-white">{pmQty}</td>
                                 <td className="py-2 pr-2 text-right font-mono text-white">${pmTotal}</td>
                                 <td className="py-2 text-right">
                                   <button className="rounded-lg bg-rose-600/80 px-2 py-1 text-[11px] font-semibold text-white hover:bg-rose-500 disabled:opacity-40" onClick={() => handleSell(p.coin, "PM", p)} disabled={pmQty <= 0.01 || (selling?.coin === p.coin && selling?.platform === "PM")}>{selling?.coin === p.coin && selling?.platform === "PM" ? "..." : "卖出"}</button>
                                 </td>
-                              </tr>,
+                              </tr>) : null,
+                              ksQty > 0.01 ? (
                               <tr key={i+"ks"} className="border-b border-blue-500/5 hover:bg-blue-500/5">
                                 <td className="py-2 pr-2"><span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[11px] text-emerald-300">KS</span></td>
                                 <td className="py-2 pr-2"><span className="text-slate-300">{(p.ks_side || p.kalshi_leg || "").toUpperCase()}</span></td>
-                                <td className="py-2 pr-2 text-right font-mono text-white">{p.ks_price.toFixed(2)}</td>
+                                <td className="py-2 pr-2 text-right font-mono text-white">{p.ks_price.toFixed(3)}</td>
                                 <td className="py-2 pr-2 text-right font-mono text-white">{ksQty}</td>
                                 <td className="py-2 pr-2 text-right font-mono text-white">${ksTotal}</td>
                                 <td className="py-2 text-right">
                                   <button className="rounded-lg bg-rose-600/80 px-2 py-1 text-[11px] font-semibold text-white hover:bg-rose-500 disabled:opacity-40" onClick={() => handleSell(p.coin, "KS", p)} disabled={ksQty <= 0.01 || !(p.ks_ticker || "") || (selling?.coin === p.coin && selling?.platform === "KS")}>{selling?.coin === p.coin && selling?.platform === "KS" ? "..." : "卖出"}</button>
                                 </td>
-                              </tr>,
-                            ]
+                              </tr>) : null,
+                            ].filter(Boolean)
                           })}
                         </tbody>
                       </table>
@@ -703,7 +748,7 @@ export default function Dashboard() {
                       <input type="number" className="mt-1 w-full rounded-xl border border-blue-500/20 bg-[#0b1729] px-3 py-2 text-sm text-white" defaultValue={settingsData.min_shares} id="s_min_shares" />
                     </div>
                     <div>
-                      <label className="text-xs text-slate-400">固定下单份数 (order_shares)</label>
+                      <label className="text-xs text-slate-400">每组双边份额</label>
                       <input type="number" className="mt-1 w-full rounded-xl border border-blue-500/20 bg-[#0b1729] px-3 py-2 text-sm text-white" defaultValue={settingsData.order_shares} id="s_order_shares" />
                     </div>
                     <div>
@@ -732,16 +777,20 @@ export default function Dashboard() {
                   <div className="mb-3 text-sm font-semibold text-blue-300 uppercase tracking-wide">下单阀值设置</div>
                   <div className="grid grid-cols-2 gap-3">
                     <div>
-                      <label className="text-xs text-slate-400">最小利润 (min_profit_cents ¢)</label>
+                      <label className="text-xs text-slate-400">最低利润 (¢/份，建议8)</label>
                       <input type="number" className="mt-1 w-full rounded-xl border border-blue-500/20 bg-[#0b1729] px-3 py-2 text-sm text-white" defaultValue={settingsData.min_profit_cents} id="s_min_profit_cents" />
                     </div>
                     <div>
-                      <label className="text-xs text-slate-400">PM价格下限 (price_min_cents ¢)</label>
-                      <input type="number" className="mt-1 w-full rounded-xl border border-blue-500/20 bg-[#0b1729] px-3 py-2 text-sm text-white" defaultValue={settingsData.price_min_cents} id="s_price_min_cents" />
+                      <label className="text-xs text-slate-400">允许下浮 (¢/份，默认1)</label>
+                      <input type="number" min="0" step="0.1" className="mt-1 w-full rounded-xl border border-blue-500/20 bg-[#0b1729] px-3 py-2 text-sm text-white" defaultValue={settingsData.profit_tolerance_cents ?? 1} id="s_profit_tolerance_cents" />
                     </div>
                     <div>
-                      <label className="text-xs text-slate-400">PM价格上限 (price_max_cents ¢)</label>
-                      <input type="number" className="mt-1 w-full rounded-xl border border-blue-500/20 bg-[#0b1729] px-3 py-2 text-sm text-white" defaultValue={settingsData.price_max_cents} id="s_price_max_cents" />
+                      <label className="text-xs text-slate-500">PM价格下限（已停用）</label>
+                      <input type="number" disabled className="mt-1 w-full rounded-xl border border-blue-500/10 bg-[#0b1729] px-3 py-2 text-sm text-slate-500 opacity-60" defaultValue={settingsData.price_min_cents} id="s_price_min_cents" />
+                    </div>
+                    <div>
+                      <label className="text-xs text-slate-500">PM价格上限（已停用）</label>
+                      <input type="number" disabled className="mt-1 w-full rounded-xl border border-blue-500/10 bg-[#0b1729] px-3 py-2 text-sm text-slate-500 opacity-60" defaultValue={settingsData.price_max_cents} id="s_price_max_cents" />
                     </div>
                     <div>
                       <label className="text-xs text-slate-400">交易冷却 (cooldown 秒)</label>
@@ -752,8 +801,8 @@ export default function Dashboard() {
                       <input type="number" step="0.1" className="mt-1 w-full rounded-xl border border-blue-500/20 bg-[#0b1729] px-3 py-2 text-sm text-white" defaultValue={settingsData.poll_interval} id="s_poll_interval" />
                     </div>
                     <div>
-                      <label className="text-xs text-slate-400">开盘延迟 (start_delay_mins 分)</label>
-                      <input type="number" className="mt-1 w-full rounded-xl border border-blue-500/20 bg-[#0b1729] px-3 py-2 text-sm text-white" defaultValue={settingsData.start_delay_mins} id="s_start_delay_mins" />
+                      <label className="text-xs text-slate-500">整点禁交易时间（已停用）</label>
+                      <input type="number" disabled className="mt-1 w-full rounded-xl border border-blue-500/10 bg-[#0b1729] px-3 py-2 text-sm text-slate-500 opacity-60" defaultValue={settingsData.start_delay_mins} id="s_start_delay_mins" />
                     </div>
                     <div>
                       <label className="text-xs text-slate-400">连续失败基础冷却 (秒)</label>
@@ -764,13 +813,13 @@ export default function Dashboard() {
                       <input type="number" className="mt-1 w-full rounded-xl border border-blue-500/20 bg-[#0b1729] px-3 py-2 text-sm text-white" defaultValue={settingsData.fail_cooldown_max} id="s_fail_cooldown_max" />
                     </div>
                     <div>
-                      <label className="text-xs text-slate-400">每小时每币种上限 (max_trades_per_hour)</label>
-                      <input type="number" className="mt-1 w-full rounded-xl border border-blue-500/20 bg-[#0b1729] px-3 py-2 text-sm text-white" defaultValue={settingsData.max_trades_per_hour} id="s_max_trades_per_hour" />
+                      <label className="text-xs text-slate-400">每小时最多组数</label>
+                      <input type="number" min="1" step="1" className="mt-1 w-full rounded-xl border border-blue-500/20 bg-[#0b1729] px-3 py-2 text-sm text-white" defaultValue={settingsData.max_trades_per_hour ?? 5} id="s_max_trades_per_hour" />
                     </div>
                   </div>
                 </div>
                 <button className="w-full rounded-xl bg-blue-600 py-3 text-sm font-semibold text-white hover:bg-blue-500 disabled:opacity-50" disabled={savingSettings} onClick={() => {
-                  const fields = ["min_shares","order_shares","min_total_balance","target_usd","min_profit_cents","price_min_cents","price_max_cents","cooldown","poll_interval","start_delay_mins","fail_cooldown_base","fail_cooldown_max","max_trades_per_hour","esports_min_profit_cents","esports_fee_buffer_cents","esports_order_shares","esports_poll_interval","update_manifest_url"]
+                  const fields = ["min_shares","order_shares","min_total_balance","target_usd","min_profit_cents","profit_tolerance_cents","price_min_cents","price_max_cents","cooldown","poll_interval","start_delay_mins","fail_cooldown_base","fail_cooldown_max","max_trades_per_hour","esports_min_profit_cents","esports_fee_buffer_cents","esports_order_shares","esports_poll_interval","update_manifest_url"]
                   const updates: Record<string,any> = {}
                   fields.forEach(f => {
                     const el = document.getElementById("s_"+f) as HTMLInputElement

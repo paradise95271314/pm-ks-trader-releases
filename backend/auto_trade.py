@@ -3,6 +3,7 @@ PM-Kalshi 套利自动交易引擎
 从 bot_config.json 读取配置，支持动态修改
 """
 import sys, os, json, threading, time, datetime
+from concurrent.futures import ThreadPoolExecutor
 from app_paths import AUTO_STATE_FILE, AUTO_STATUS_FILE, HISTORY_FILE
 from settings_manager import DEFAULT_CONFIG, load_config, save_config
 from get_current_markets import get_coin_market_urls
@@ -10,6 +11,9 @@ from coin_config import get_supported_coins
 from fetch_current_polymarket import fetch_polymarket_data_struct
 from fetch_current_kalshi import fetch_kalshi_data_struct
 from execute_arb import execute_arb, get_ks_ticker
+from market_quotes import is_fast_market_rejection
+from trading_policy import effective_profit_floor, hourly_group_allowed, profit_meets_threshold
+from execution_prices import result_fill_price
 
 _config = load_config()
 ENABLED_COINS = _config["enabled_coins"]
@@ -34,6 +38,8 @@ _last_trade_time = 0
 _last_trade_result = {}
 _trade_count = 0
 _consecutive_fails = 0
+_last_scan_log_time = 0
+_balance_cache = {"time": 0.0, "pm": -1.0, "ks": -1.0}
 def _load_history():
     try:
         with open(_HISTORY_FILE) as f: return json.load(f)
@@ -97,9 +103,11 @@ def reload_config():
     _config = load_config()
     ENABLED_COINS = _config["enabled_coins"]
     _current_profit_threshold = _config["min_profit_cents"]
-def _fetch_balances():
+def _fetch_balances(force=False):
     """获取两边余额，失败返回 -1"""
-    import sys as _sys
+    now = time.time()
+    if not force and now - _balance_cache["time"] < 30:
+        return _balance_cache["pm"], _balance_cache["ks"]
     try:
         from py_clob_client_v2 import ClobClient
         from py_clob_client_v2.clob_types import BalanceAllowanceParams
@@ -118,36 +126,30 @@ def _fetch_balances():
         ks_b = float(_fwa(kk, "/portfolio/balance").get("balance_dollars", 0))
     except Exception:
         ks_b = -1
+    _balance_cache.update({"time": now, "pm": pm_b, "ks": ks_b})
     return pm_b, ks_b
 
 
+def _balance_refresh_loop():
+    while True:
+        try:
+            _fetch_balances(force=True)
+        except Exception:
+            pass
+        time.sleep(15)
 
-# ==================== 每小时只下一单 相关逻辑 ====================
+
+
+# ==================== 每小时分组上限 ====================
 
 def can_trade_this_hour(coin: str) -> bool:
-    """判断这个币种本小时是否还能下单"""
+    """Allow another group until the configured hourly completed-group limit."""
     cfg = _config
-    max_trades = cfg.get("max_trades_per_hour", 1)
-
-    # 1. 已有未结算持仓 → 拒绝
-    if coin in _active_positions:
-        age = time.time() - _active_positions[coin]
-        if age < 4500:  # 1小时15分钟内视为还在持仓
-            print(f"[AutoTrade] [限制] {coin} 本小时已有持仓（{age:.0f}秒前），跳过")
-            return False
-        else:
-            del _active_positions[coin]
-
-    # 2. 本小时下单次数达到上限（持仓已结算时自动清空）
+    max_trades = max(1, int(cfg.get("max_trades_per_hour", 5) or 5))
     current_count = _hourly_trades.get(coin, 0)
-    if current_count >= max_trades:
-        if coin not in _active_positions:
-            _hourly_trades[coin] = 0
-            print(f"[AutoTrade] [限制] {coin} 持仓已结算，重置小时计数")
-            return True
-        print(f"[AutoTrade] [限制] {coin} 本小时已下 {current_count} 单，达到上限 {max_trades}")
+    if not hourly_group_allowed(current_count, max_trades):
+        print(f"[AutoTrade] [限制] {coin} 本小时已完成 {current_count} 组，达到上限 {max_trades}组")
         return False
-
     return True
 
 
@@ -223,17 +225,11 @@ def stop():
 
 
 def _is_after_start_delay():
-    if not _config.get("market_start_time", ""):
-        minute = datetime.datetime.now().minute
-        sd = _config["start_delay_mins"]
-        if minute < sd or minute >= 60 - sd:
-            return False
+    cfg = _config
+    delay = cfg.get("start_delay_mins", 0)
+    if delay <= 0:
         return True
-    try:
-        start = datetime.datetime.fromisoformat(_config["market_start_time"]).timestamp()
-        return time.time() >= start + _config["start_delay_mins"] * 60
-    except:
-        return True
+    return datetime.datetime.now().minute >= delay
 
 
 def _decide_best_opp():
@@ -244,14 +240,20 @@ def _decide_best_opp():
     best = None
     best_margin = 0
     cfg = _config
-    threshold = _current_profit_threshold
+    threshold = effective_profit_floor(cfg)
 
     for symbol in ENABLED_COINS:
         info = urls.get(symbol)
         if not info:
             continue
 
-        poly, perr = fetch_polymarket_data_struct(info["polymarket_slug"], info["binance_symbol"])
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            poly_future = pool.submit(
+                fetch_polymarket_data_struct, info["polymarket_slug"], info["binance_symbol"])
+            kalshi_future = pool.submit(
+                fetch_kalshi_data_struct, info["kalshi_event_ticker"], info["binance_symbol"])
+            poly, perr = poly_future.result()
+            kalshi, kerr = kalshi_future.result()
         if not poly:
             continue
         pstrike = poly["price_to_beat"]
@@ -264,14 +266,10 @@ def _decide_best_opp():
         if not poly.get("hasLiquidity", True):
             continue
 
-        kalshi, kerr = fetch_kalshi_data_struct(info["kalshi_event_ticker"], info["binance_symbol"])
         if not kalshi:
             continue
         if kalshi.get("isFinished", False):
             continue
-
-        pmin = cfg["price_min_cents"]
-        pmax = cfg["price_max_cents"]
 
         kalshi_markets = kalshi.get("markets", [])
         for km in kalshi_markets:
@@ -285,31 +283,27 @@ def _decide_best_opp():
             if pstrike > ks:
                 cost = poly_down_cents + ky_cents
                 profit = 100 - cost
-                if not (pmin <= poly_down_cents <= pmax):
-                    continue
-                if profit < threshold:
+                if not profit_meets_threshold(profit, threshold):
                     continue
                 margin = profit / cost
                 if margin > best_margin:
                     best = {"coin": symbol, "poly_leg": "Down", "ks_ticker": ticker,
                             "total_cost_cents": cost, "kalshi_strike": ks, "profit_cents": profit,
                             "pm_price_cents": poly_down_cents, "ks_price_cents": ky_cents, "ks_price": ky_cents / 100.0,
-                            "ks_side": "yes", "token_id": None}
+                            "ks_side": "yes", "token_id": poly.get("token_ids", {}).get("Down")}
                     best_margin = margin
 
             elif pstrike < ks:
                 cost = poly_up_cents + kn_cents
                 profit = 100 - cost
-                if not (pmin <= poly_up_cents <= pmax):
-                    continue
-                if profit < threshold:
+                if not profit_meets_threshold(profit, threshold):
                     continue
                 margin = profit / cost
                 if margin > best_margin:
                     best = {"coin": symbol, "poly_leg": "Up", "ks_ticker": ticker,
                             "total_cost_cents": cost, "kalshi_strike": ks, "profit_cents": profit,
                             "pm_price_cents": poly_up_cents, "ks_price_cents": kn_cents, "ks_price": kn_cents / 100.0,
-                            "ks_side": "no", "token_id": None}
+                            "ks_side": "no", "token_id": poly.get("token_ids", {}).get("Up")}
                     best_margin = margin
 
             else:
@@ -318,9 +312,7 @@ def _decide_best_opp():
                 for cost, leg in [(cost1, "Down"), (cost2, "Up")]:
                     profit = 100 - cost
                     pm_cents = poly_down_cents if leg == "Down" else poly_up_cents
-                    if not (pmin <= pm_cents <= pmax):
-                        continue
-                    if profit < threshold:
+                    if not profit_meets_threshold(profit, threshold):
                         continue
                     margin = profit / cost
                     if margin > best_margin:
@@ -328,24 +320,9 @@ def _decide_best_opp():
                                 "total_cost_cents": cost, "kalshi_strike": ks, "profit_cents": profit,
                                 "pm_price_cents": pm_cents, "ks_price_cents": ky_cents if leg == "Down" else kn_cents, "ks_price": (ky_cents if leg == "Down" else kn_cents) / 100.0,
                                 "ks_side": "yes" if leg == "Down" else "no",
-                                "token_id": None}
+                                "token_id": poly.get("token_ids", {}).get(leg)}
                         best_margin = margin
 
-    if best:
-        try:
-            import requests as _req
-            _bslug = urls.get(best["coin"], {}).get("polymarket_slug", "")
-            if _bslug:
-                _gr = _req.get("https://gamma-api.polymarket.com/events?slug=" + _bslug, timeout=5).json()
-                _gm = _gr[0]["markets"][0]
-                _cids = json.loads(_gm.get("clobTokenIds", "[]"))
-                _outs = json.loads(_gm.get("outcomes", "[]"))
-                for _oc, _cid in zip(_outs, _cids):
-                    if _oc.upper() == best["poly_leg"].upper():
-                        best["token_id"] = _cid
-                        break
-        except Exception:
-            pass
     if not best and ENABLED_COINS:
         _prices = []
         for _sym in ENABLED_COINS:
@@ -358,7 +335,11 @@ def _decide_best_opp():
                 except:
                     pass
         if _prices:
-            print("[AutoTrade] 扫描完成: 无有效套利, %s" % " | ".join(_prices))
+            global _last_scan_log_time
+            _now = time.time()
+            if _now - _last_scan_log_time >= 60:
+                print("[AutoTrade] 扫描完成: 无有效套利, %s" % " | ".join(_prices))
+                _last_scan_log_time = _now
     return best
 
 
@@ -413,13 +394,11 @@ def _loop():
                 time.sleep(cfg["poll_interval"])
                 continue
 
-            # ===== 每小时只下一单检查 =====
+            # 每组完整成交后计数；已有完整对冲持仓不会阻止下一组。
             coin = opp["coin"]
             if not can_trade_this_hour(coin):
                 time.sleep(cfg["poll_interval"])
                 continue
-            # ==================================
-
             print("[AutoTrade] 下单参数: %s %s strike=%.0f ks_price=%.4f token_id=%s target=%.1f" % (
                 opp["coin"], opp["poly_leg"], opp["kalshi_strike"],
                 opp["ks_price"], opp.get("token_id", "")[:20],
@@ -434,9 +413,11 @@ def _loop():
                 target_usd=cfg.get("target_usd", 10.0),
                 min_shares=cfg.get("min_shares", 0),
                 ks_strike=opp.get("kalshi_strike", 0),
-                min_profit_cents=cfg.get("min_profit_cents", 0),
+                min_profit_cents=effective_profit_floor(cfg),
                 fixed_shares=cfg.get("order_shares", 0),
                 liquidity_buffer=cfg.get("liquidity_buffer", 2.0),
+                exact_ks_ticker=True,
+                skip_balance_check=True,
             )
 
             if result is None:
@@ -485,8 +466,8 @@ def _loop():
                     "pm_filled_qty": result.get("pm", {}).get("filled_qty", 0),
                     "ks_fill_count": result.get("ks", {}).get("fill_count", 0),
                     "hedged_qty": result.get("hedged_qty", 0),
-                    "pm_price": result.get("pm_plan", {}).get("price", 0),
-                    "ks_price": result.get("ks_plan", {}).get("price", 0),
+                    "pm_price": result_fill_price(result, "pm"),
+                    "ks_price": result_fill_price(result, "ks"),
                     "token_id": result.get("token_id", opp.get("token_id", "")),
                     "ks_ticker": result.get("ks_ticker", opp.get("ks_ticker", "")),
                     "ks_side": opp.get("ks_side", "yes"),
@@ -505,12 +486,19 @@ def _loop():
                 print("[AutoTrade] ✅ 成功: %s %s KS=%s (利润%.1f¢)" % (
                     opp["coin"], opp["poly_leg"], opp.get("ks_side", "?").upper(), opp["profit_cents"]))
             else:
-                _consecutive_fails += 1
-                extra_wait = min(cfg["fail_cooldown_base"] * _consecutive_fails, cfg["fail_cooldown_max"])
-                print("[AutoTrade] ❌ 失败(第%d次连续): %s  额外冷却%d秒" % (_consecutive_fails, result.get("error", ""), extra_wait))
-                with _lock:
-                    _last_trade_time = time.time() - cfg["cooldown"] + extra_wait
-                    _save_state()
+                error = result.get("error", "")
+                if is_fast_market_rejection(error):
+                    print("[AutoTrade] 行情已变化，立即继续扫描: %s" % error)
+                    with _lock:
+                        _last_trade_time = 0
+                        _save_state()
+                else:
+                    _consecutive_fails += 1
+                    extra_wait = min(cfg["fail_cooldown_base"] * _consecutive_fails, cfg["fail_cooldown_max"])
+                    print("[AutoTrade] ❌ 失败(第%d次连续): %s  额外冷却%d秒" % (_consecutive_fails, error, extra_wait))
+                    with _lock:
+                        _last_trade_time = time.time() - cfg["cooldown"] + extra_wait
+                        _save_state()
 
         except Exception as e:
             import traceback; print("[AutoTrade] 异常:\n" + traceback.format_exc())
@@ -518,6 +506,8 @@ def _loop():
         time.sleep(cfg["poll_interval"])
 
 
+_balance_thread = threading.Thread(target=_balance_refresh_loop, daemon=True)
+_balance_thread.start()
 _thread = threading.Thread(target=_loop, daemon=True)
 _thread.start()
 

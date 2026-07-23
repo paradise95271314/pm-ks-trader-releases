@@ -1,6 +1,9 @@
 name: Build and publish Windows update
 
 on:
+  push:
+    tags:
+      - 'v*.*.*'
   workflow_dispatch:
     inputs:
       version:
@@ -19,9 +22,9 @@ jobs:
   build-and-publish:
     runs-on: windows-latest
     env:
-      APP_VERSION: ${{ inputs.version }}
+      APP_VERSION: ${{ inputs.version || github.ref_name }}
       RELEASE_REPO: paradise95271314/pm-ks-trader-releases
-      RELEASE_NOTES: ${{ inputs.notes }}
+      RELEASE_NOTES: ${{ inputs.notes || format('PM-KS Trader {0}', github.ref_name) }}
     steps:
       - name: Check out private source
         uses: actions/checkout@v4
@@ -29,9 +32,11 @@ jobs:
       - name: Validate version
         shell: pwsh
         run: |
+          $env:APP_VERSION = $env:APP_VERSION -replace '^v', ''
           if ($env:APP_VERSION -notmatch '^\d+\.\d+\.\d+$') {
             throw 'Version must look like 1.2.3'
           }
+          "APP_VERSION=$env:APP_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Set release version
         shell: pwsh

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import asyncio
 import os
 import socket
 import sys
@@ -25,6 +26,7 @@ os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
 
 from app_paths import DATA_DIR  # noqa: E402
 from credential_store import apply_credentials_to_environment  # noqa: E402
+from desktop_runtime import install_disconnect_filter  # noqa: E402
 
 
 _mutex = None
@@ -56,6 +58,14 @@ def _wait_for_server(url: str, timeout: float = 20.0) -> None:
     raise RuntimeError("本机交易服务启动超时")
 
 
+def _run_server(server) -> None:
+    async def serve() -> None:
+        install_disconnect_filter(asyncio.get_running_loop())
+        await server.serve()
+
+    asyncio.run(serve())
+
+
 def main() -> int:
     if not _single_instance():
         ctypes.windll.user32.MessageBoxW(None, "程序已经在运行。", "PM-KS交易桌面", 0x40)
@@ -69,7 +79,7 @@ def main() -> int:
     url = f"http://127.0.0.1:{port}"
     config = uvicorn.Config(app, host="127.0.0.1", port=port, access_log=False, log_level="warning")
     server = uvicorn.Server(config)
-    thread = threading.Thread(target=server.run, name="local-api", daemon=True)
+    thread = threading.Thread(target=_run_server, args=(server,), name="local-api", daemon=True)
     thread.start()
     _wait_for_server(url)
 

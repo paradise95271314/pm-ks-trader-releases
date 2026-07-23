@@ -7,11 +7,6 @@ COINS = {
         "kalshi_series": "KXBTCD",
         "binance_symbol": "BTCUSDT",
     },
-    "ETH": {
-        "polymarket_name": "ethereum",
-        "kalshi_series": "KXETHD",
-        "binance_symbol": "ETHUSDT",
-    },
 }
 
 

@@ -31,6 +31,10 @@ def _version(value: str) -> tuple[int, ...]:
         return (0,)
 
 
+def version_info() -> dict[str, str]:
+    return {"version": APP_VERSION}
+
+
 def get_manifest_url(config: dict[str, Any] | None = None) -> str:
     if os.environ.get("UPDATE_MANIFEST_URL", "").strip():
         return os.environ["UPDATE_MANIFEST_URL"].strip()

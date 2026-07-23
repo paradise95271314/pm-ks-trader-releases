@@ -1,5 +1,6 @@
 """对冲执行模块 — 面板点击"买入"后自动下 PM + KS 两腿"""
 import math, json, requests, uuid, urllib.request, base64, time, os, sys, re
+from concurrent.futures import ThreadPoolExecutor
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE)
@@ -10,6 +11,7 @@ if os.path.exists(_legacy_env):
     load_dotenv(_legacy_env, override=False)
 from py_clob_client_v2 import ClobClient
 from py_clob_client_v2.clob_types import OrderArgsV2, MarketOrderArgsV2, BalanceAllowanceParams, OrderType, OrderType
+from execution_prices import kalshi_outcome_fill_price, polymarket_fill_price
 try:
     from kalshi_auth import fetch_with_auth, get_api_key_id, get_private_key
     _LEGACY_KH = ""
@@ -92,7 +94,7 @@ def get_ks_ticker(event_ticker, strike):
     return event_ticker + "-B" + str(int(strike + 50))
 
 
-def execute_arb(coin, pm_direction, ks_ticker, ks_side="yes", ks_price=None, target_usd=10.0, token_id="", min_shares=0, ks_strike=0.0, min_profit_cents=0.0, fixed_shares=0, liquidity_buffer=2.0, pm_slug="", exact_ks_ticker=False):
+def execute_arb(coin, pm_direction, ks_ticker, ks_side="yes", ks_price=None, target_usd=10.0, token_id="", min_shares=0, ks_strike=0.0, min_profit_cents=0.0, fixed_shares=0, liquidity_buffer=2.0, pm_slug="", exact_ks_ticker=False, skip_balance_check=False):
     """
     执行对冲：先成交较薄的KS腿，再刷新并成交PM腿
     target_usd: 目标以 PM 价为基准的名义金额（美元），对冲两腿用相同份数
@@ -114,8 +116,10 @@ def execute_arb(coin, pm_direction, ks_ticker, ks_side="yes", ks_price=None, tar
         result["error"] = str(exc)
         return result
 
-    # 查余额（仅供显示，不阻止下单）
+    # 自动交易刚检查过缓存余额，不在关键下单路径重复联网。
     try:
+        if skip_balance_check:
+            raise RuntimeError("skip cached balance")
         key = os.environ.get("POLYMARKET_PRIVATE_KEY") or os.environ.get("PRIVATE_KEY")
         funder = os.environ.get("POLYMARKET_FUNDER")
         sig_type = int(os.environ.get("POLYMARKET_SIGNATURE_TYPE", "0"))
@@ -127,6 +131,8 @@ def execute_arb(coin, pm_direction, ks_ticker, ks_side="yes", ks_price=None, tar
     except Exception:
         pm_bal = -1
     try:
+        if skip_balance_check:
+            raise RuntimeError("skip cached balance")
         ks_bal = float(fetch_with_auth(kalshi_key, "/portfolio/balance").get("balance_dollars", 0))
     except Exception:
         ks_bal = -1
@@ -145,20 +151,18 @@ def execute_arb(coin, pm_direction, ks_ticker, ks_side="yes", ks_price=None, tar
         result["error"] = "未知币种或slug为空: " + coin
         return result
 
-    # PM gamma
-    try:
-        r = requests.get("https://gamma-api.polymarket.com/events?slug=" + slug,
-                         timeout=10, headers={"User-Agent": UA})
-        ev = r.json()[0]
-        m = ev.get("markets", [{}])[0]
-        cids = json.loads(m.get("clobTokenIds", "[]"))
-        outs = json.loads(m.get("outcomes", "[]"))
-    except Exception as e:
-        result["error"] = "PM gamma获取失败: " + str(e)[:100]
-        return result
-
     tid = token_id
     if not tid:
+        try:
+            r = requests.get("https://gamma-api.polymarket.com/events?slug=" + slug,
+                             timeout=10, headers={"User-Agent": UA})
+            ev = r.json()[0]
+            m = ev.get("markets", [{}])[0]
+            cids = json.loads(m.get("clobTokenIds", "[]"))
+            outs = json.loads(m.get("outcomes", "[]"))
+        except Exception as e:
+            result["error"] = "PM gamma获取失败: " + str(e)[:100]
+            return result
         for oc, cid in zip(outs, cids):
             if oc.upper() == pm_direction.upper():
                 tid = cid
@@ -167,10 +171,25 @@ def execute_arb(coin, pm_direction, ks_ticker, ks_side="yes", ks_price=None, tar
             result["error"] = "PM %s tokenId不存在" % pm_direction
             return result
 
-    # PM CLOB 盘口 — 取最低卖价及可用量
+    # 自动交易已有精确ticker时，并行刷新两边最终盘口。
+    prefetched_ks_market = None
+    prefetched_ks_orderbook = None
     try:
-        b = requests.get("https://clob.polymarket.com/book?token_id=" + tid,
-                         timeout=10).json()
+        if exact_ks_ticker:
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                pm_future = pool.submit(
+                    requests.get, "https://clob.polymarket.com/book?token_id=" + tid, timeout=10)
+                ks_market_future = pool.submit(
+                    fetch_with_auth, kalshi_key, "/markets/" + ks_ticker)
+                ks_book_future = pool.submit(
+                    fetch_with_auth, kalshi_key, "/markets/" + ks_ticker + "/orderbook?depth=100")
+                b = pm_future.result().json()
+                market_payload = ks_market_future.result()
+                prefetched_ks_market = market_payload.get("market", market_payload)
+                prefetched_ks_orderbook = ks_book_future.result()
+        else:
+            b = requests.get("https://clob.polymarket.com/book?token_id=" + tid,
+                             timeout=10).json()
         asks = sorted(b.get("asks", []), key=lambda x: float(x["price"]))
     except Exception as e:
         result["error"] = "PM盘口获取失败: " + str(e)[:100]
@@ -209,8 +228,7 @@ def execute_arb(coin, pm_direction, ks_ticker, ks_side="yes", ks_price=None, tar
         import re as _re
         _found = None
         if exact_ks_ticker:
-            _payload = fetch_with_auth(kalshi_key, "/markets/" + ks_ticker)
-            _found = _payload.get("market", _payload)
+            _found = prefetched_ks_market
             _et = str(_found.get("event_ticker", ""))
         else:
             _m = _re.match(r'^([A-Z0-9-]+?)-T\d', ks_ticker)
@@ -254,7 +272,7 @@ def execute_arb(coin, pm_direction, ks_ticker, ks_side="yes", ks_price=None, tar
             "size": hedge_shares,
             "notional": round(ks_outcome_price * hedge_shares, 2),
         }
-        ks_orderbook = fetch_with_auth(
+        ks_orderbook = prefetched_ks_orderbook or fetch_with_auth(
             kalshi_key, "/markets/" + ks_ticker + "/orderbook?depth=100")
         ks_available = _kalshi_resting_volume(ks_orderbook, ks_side, ks_outcome_price)
         result["ks_plan"]["available"] = round(ks_available, 4)
@@ -336,6 +354,7 @@ def execute_arb(coin, pm_direction, ks_ticker, ks_side="yes", ks_price=None, tar
     ks_raw = None
     pm_exc = None
     ks_exc = None
+    direction_mismatch = False
     try:
         ks_raw = _place_ks()
     except Exception as e:
@@ -366,22 +385,12 @@ def execute_arb(coin, pm_direction, ks_ticker, ks_side="yes", ks_price=None, tar
                          "fill_count": ks_fill_count,
                          "filled": ks_success,
                          "avg_price": str(ks_order.get("average_fill_price", "?")),
+                         "avg_outcome_price": kalshi_outcome_fill_price(
+                             ks_order, ks_side, ks_outcome_price),
                          "outcome_side": ks_side,
                          "book_side": ks_book_side}
         if ks_order_error:
             result["ks"]["error"] = ks_order_error
-        if ks_success and ks_order.get("order_id"):
-            try:
-                detail = fetch_with_auth(kalshi_key, "/portfolio/orders/" + str(ks_order["order_id"]))
-                actual = str(detail.get("order", {}).get("outcome_side", "")).lower()
-                result["ks"]["direction_verified"] = (actual == ks_side)
-                result["ks"]["actual_outcome_side"] = actual
-                if actual and actual != ks_side:
-                    result["direction_alert"] = "KS方向异常: expected=%s actual=%s" % (ks_side, actual)
-                    ks_success = False
-                    result["ks"]["filled"] = False
-            except Exception as e:
-                result["ks"]["direction_verify_error"] = str(e)[:100]
     elif ks_exc:
         result["ks"] = {"error": str(ks_exc)[:200]}
     else:
@@ -393,6 +402,19 @@ def execute_arb(coin, pm_direction, ks_ticker, ks_side="yes", ks_price=None, tar
         except Exception as e:
             pm_exc = e
 
+    # 第二腿已提交后再查询详情；订单构造仍由已测试的方向映射保证。
+    if ks_success and ks_order.get("order_id"):
+        try:
+            detail = fetch_with_auth(kalshi_key, "/portfolio/orders/" + str(ks_order["order_id"]))
+            actual = str(detail.get("order", {}).get("outcome_side", "")).lower()
+            result["ks"]["direction_verified"] = (actual == ks_side)
+            result["ks"]["actual_outcome_side"] = actual
+            if actual and actual != ks_side:
+                result["direction_alert"] = "KS方向异常: expected=%s actual=%s" % (ks_side, actual)
+                direction_mismatch = True
+        except Exception as e:
+            result["ks"]["direction_verify_error"] = str(e)[:100]
+
     # === 解析PM结果（必须在KS成交并提交PM之后） ===
     pm_success = False
     pm_filled_qty = 0.0
@@ -402,7 +424,8 @@ def execute_arb(coin, pm_direction, ks_ticker, ks_side="yes", ks_price=None, tar
         pm_success = pm_filled_qty > 0
         result["pm"] = {"order_id": pm_res.get("order_id", "?"),
                          "status": pm_status, "filled": pm_success,
-                         "filled_qty": pm_filled_qty}
+                         "filled_qty": pm_filled_qty,
+                         "avg_outcome_price": polymarket_fill_price(pm_res, pm_price)}
         if abs(pm_filled_qty - hedge_shares) >= 0.01:
             result["pm"]["warning"] = "PM价格改善导致数量变化: 请求%d张, 实成%.2f张" % (
                 hedge_shares, pm_filled_qty)
@@ -595,5 +618,11 @@ def execute_arb(coin, pm_direction, ks_ticker, ks_side="yes", ks_price=None, tar
                         result["pm_close_residual"] = {"size": pm_residual, "filled": fill_res, "remaining": round(pm_residual - fill_res, 4)}
                 except Exception:
                     pass
+
+        if direction_mismatch:
+            result["success"] = False
+            result["error"] = result["direction_alert"]
+            result["unhedged_platform"] = "方向校验"
+            result["unhedged_qty"] = hedged_qty
 
     return result

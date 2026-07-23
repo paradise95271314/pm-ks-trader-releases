@@ -4,12 +4,14 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from app_paths import HISTORY_FILE, LOG_FILE, bundled_frontend_dir, ensure_data_dir
 from credential_store import apply_credentials_to_environment, credential_status, import_transfer_bundle, load_credentials, save_credentials
+from logging_setup import TeeLogger, read_log
 
 ensure_data_dir()
 apply_credentials_to_environment()
 from fetch_current_polymarket import fetch_polymarket_data_struct
 from fetch_current_kalshi import fetch_kalshi_data_struct
 from get_current_markets import get_coin_market_urls
+from arbitrage_view import select_best_check
 
 # Suppress py_clob_client_v2 connection error noise
 import logging
@@ -27,47 +29,34 @@ builtins.print = _filtered_print
 # ====== 日志重定向到本机应用数据目录 ======
 import sys as _sys
 _LOG_FILE = str(LOG_FILE)
-_log_fh = open(_LOG_FILE, "a", buffering=1)
 _old_stdout = _sys.stdout
 _old_stderr = _sys.stderr
-class _TeeLogger:
-    def __init__(self):
-        self.terminal_out = _old_stdout
-        self.terminal_err = _old_stderr
-    def write(self, text):
-        _log_fh.write(text)
-        if self.terminal_out is not None:
-            try:
-                self.terminal_out.write(text)
-            except UnicodeEncodeError:
-                encoding = getattr(self.terminal_out, "encoding", None) or "utf-8"
-                self.terminal_out.write(text.encode(encoding, errors="replace").decode(encoding))
-    def flush(self):
-        _log_fh.flush()
-        if self.terminal_out is not None:
-            self.terminal_out.flush()
-    def isatty(self): return self.terminal_out.isatty() if self.terminal_out is not None else False
-_sys.stdout = _TeeLogger()
-_sys.stderr = _TeeLogger()
+_sys.stdout = TeeLogger(LOG_FILE, _old_stdout)
+_sys.stderr = _sys.stdout
 print("[API] 日志已重定向到 %s" % _LOG_FILE)
 # ===================================
 
 from coin_config import get_supported_coins
+from market_quotes import has_valid_pm_asks
 from execute_arb import execute_arb, get_ks_ticker
 import auto_trade
-from update_manager import check_update, get_manifest_url, stage_update
+from update_manager import check_update, get_manifest_url, stage_update, version_info
 from esports_arbitrage import AUTO as esports_auto, execute_opportunity as execute_esports_opportunity, scan as scan_esports
 from pydantic import BaseModel
 import datetime
 import time, os, json, sys
 import re
 from typing import Any
+from concurrent.futures import ThreadPoolExecutor
 
 # 设置管理
 from settings_manager import load_config, save_config as sc
+from position_snapshot import TrustedPositionSnapshot
+from execution_prices import result_fill_price
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+_position_snapshot = TrustedPositionSnapshot()
 
 class ExecuteRequest(BaseModel):
     coin: str
@@ -94,6 +83,7 @@ class SettingsRequest(BaseModel):
     poll_interval: float | None = None
     cooldown: int | None = None
     min_profit_cents: int | None = None
+    profit_tolerance_cents: float | None = None
     price_min_cents: int | None = None
     price_max_cents: int | None = None
     min_shares: int | None = None
@@ -154,9 +144,12 @@ def get_arbitrage_data():
         info = coin_urls.get(symbol)
         if not info:
             continue
-        coin_result = {"polymarket": None, "kalshi": None, "checks": [], "opportunities": [], "errors": []}
-        poly_data, poly_err = fetch_polymarket_data_struct(info["polymarket_slug"], info["binance_symbol"])
-        kalshi_data, kalshi_err = fetch_kalshi_data_struct(info["kalshi_event_ticker"], info["binance_symbol"])
+        coin_result = {"polymarket": None, "kalshi": None, "checks": [], "opportunities": [], "best_check": None, "errors": []}
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            poly_future = pool.submit(fetch_polymarket_data_struct, info["polymarket_slug"], info["binance_symbol"])
+            kalshi_future = pool.submit(fetch_kalshi_data_struct, info["kalshi_event_ticker"], info["binance_symbol"])
+            poly_data, poly_err = poly_future.result()
+            kalshi_data, kalshi_err = kalshi_future.result()
         if poly_err:
             coin_result["errors"].append("Polymarket: " + poly_err)
         if kalshi_err:
@@ -169,6 +162,10 @@ def get_arbitrage_data():
         poly_strike = poly_data["price_to_beat"]
         poly_up_cost = poly_data["prices"].get("Up", 0.0)
         poly_down_cost = poly_data["prices"].get("Down", 0.0)
+        if not has_valid_pm_asks(poly_data["prices"]):
+            coin_result["errors"].append("Polymarket: 盘口缺少有效卖单，本轮不计算套利")
+            response["coins"][symbol] = coin_result
+            continue
         if poly_strike is None:
             coin_result["errors"].append("Polymarket Strike is None")
             response["coins"][symbol] = coin_result
@@ -241,6 +238,7 @@ def get_arbitrage_data():
                 coin_result["opportunities"].append(chk)
             coin_result["checks"].append(chk)
 
+        coin_result["best_check"] = select_best_check(coin_result["checks"])
         response["coins"][symbol] = coin_result
     return response
 
@@ -257,8 +255,10 @@ def execute_trade(req: ExecuteRequest):
                 resolved = get_ks_ticker(et, req.kalshi_strike)
                 if resolved:
                     req.ks_ticker = resolved
-        configured_shares = int(load_config().get("order_shares", 5) or 5)
-        requested_shares = max(int(req.shares or configured_shares), int(load_config().get("min_shares", 5) or 5))
+        cfg = load_config()
+        from trading_policy import effective_profit_floor
+        configured_shares = int(cfg.get("order_shares", 5) or 5)
+        requested_shares = max(int(req.shares or configured_shares), int(cfg.get("min_shares", 5) or 5))
         result = execute_arb(
             coin=req.coin,
             pm_direction=req.poly_leg,
@@ -268,8 +268,8 @@ def execute_trade(req: ExecuteRequest):
             ks_strike=req.kalshi_strike,
             fixed_shares=requested_shares,
             min_shares=requested_shares,
-            liquidity_buffer=float(load_config().get("liquidity_buffer", 2.0)),
-            min_profit_cents=float(load_config().get("min_profit_cents", 10)),
+            liquidity_buffer=float(cfg.get("liquidity_buffer", 1.0)),
+            min_profit_cents=effective_profit_floor(cfg),
         )
 
         try:
@@ -287,8 +287,8 @@ def execute_trade(req: ExecuteRequest):
                 'pm_filled_qty': result.get('pm', {}).get('filled_qty', 0),
                 'ks_fill_count': result.get('ks', {}).get('fill_count', 0),
                 'hedged_qty': result.get('hedged_qty', 0),
-                'pm_price': result.get('pm_plan', {}).get('price', 0),
-                'ks_price': result.get('ks_plan', {}).get('price', 0),
+                'pm_price': result_fill_price(result, "pm"),
+                'ks_price': result_fill_price(result, "ks"),
                 'token_id': result.get('token_id', ''),
                 'size_warning': result.get('size_warning', ''),
                 'ks_ticker': result.get('ks_ticker', req.ks_ticker),
@@ -306,6 +306,9 @@ def execute_trade(req: ExecuteRequest):
 @app.get("/esports/arbitrage")
 def get_esports_arbitrage():
     try:
+        status = esports_auto.status()
+        if status.get("enabled") and status.get("last_scan"):
+            return status["last_scan"]
         cfg = load_config()
         return scan_esports(
             min_profit_cents=float(cfg.get("esports_min_profit_cents", 10)),
@@ -347,8 +350,8 @@ def execute_esports_trade(req: EsportsExecuteRequest):
                 "ks_fill_count": result.get("ks", {}).get("fill_count", 0),
                 "hedged_qty": result.get("hedged_qty", 0), "token_id": selected.get("pm_token_id", ""),
                 "ks_ticker": selected.get("ks_ticker", ""), "ks_side": selected.get("ks_side", "yes"),
-                "pm_price": result.get("pm_plan", {}).get("price", selected.get("pm_price", 0)),
-                "ks_price": result.get("ks_plan", {}).get("price", selected.get("ks_price", 0)),
+                "pm_price": result_fill_price(result, "pm"),
+                "ks_price": result_fill_price(result, "ks"),
             })
             with HISTORY_FILE.open("w", encoding="utf-8") as fh:
                 json.dump(hist[-500:], fh, ensure_ascii=False)
@@ -525,13 +528,18 @@ def health():
     return {"status": "ok", "time": datetime.datetime.now().isoformat()}
 
 
+@app.get("/version")
+def app_version():
+    return version_info()
+
+
 @app.get("/update/check")
 def update_check():
     try:
         cfg = load_config()
         return check_update(get_manifest_url(cfg))
     except Exception as exc:
-        return {"configured": True, "current_version": "1.3.0", "available": False,
+        return {"configured": True, "current_version": "1.2.0", "available": False,
                 "error": "检查更新失败: " + str(exc)[:200]}
 
 
@@ -670,20 +678,36 @@ def get_positions():
     def parse_ts(ts):
         try: return datetime.datetime.fromisoformat(ts).timestamp()
         except: return 0
-    positions = []
-    for t in hist:
-        if not t.get("success"):
-            continue
-        ts = parse_ts(t.get("time", ""))
-        if ts <= cutoff:
-            continue
-        qty = float(t.get("hedged_qty") or t.get("pm_filled_qty") or t.get("ks_fill_count") or 0)
-        item = dict(t)
-        item["pm_remaining"] = round(max(0.0, qty - float(item.get("pm_closed_qty", 0) or 0)), 4)
-        item["ks_remaining"] = round(max(0.0, qty - float(item.get("ks_closed_qty", 0) or 0)), 4)
-        if item["pm_remaining"] > 0.01 or item["ks_remaining"] > 0.01:
-            positions.append(item)
-    return {"positions": positions, "total": len(positions)}
+    recent = [t for t in hist if parse_ts(t.get("time", "")) > cutoff]
+    pm_live = None
+    ks_live = None
+    errors = []
+    try:
+        import requests
+        funder = os.environ.get("POLYMARKET_FUNDER", "")
+        if not funder:
+            raise RuntimeError("POLYMARKET_FUNDER未配置")
+        payload = requests.get(
+            "https://data-api.polymarket.com/positions",
+            params={"user": funder, "sizeThreshold": 0.01, "limit": 500},
+            timeout=(3, 6),
+        ).json()
+        from position_reconciliation import polymarket_position_sizes
+        pm_live = polymarket_position_sizes(payload)
+    except Exception as exc:
+        errors.append("PM实时持仓查询失败: " + str(exc)[:100])
+    try:
+        from kalshi_auth import fetch_with_auth, get_private_key
+        from position_reconciliation import kalshi_position_sizes
+        payload = fetch_with_auth(get_private_key(), "/portfolio/positions?count_filter=position&limit=1000")
+        ks_live = kalshi_position_sizes(payload)
+    except Exception as exc:
+        errors.append("KS实时持仓查询失败: " + str(exc)[:100])
+    from position_reconciliation import reconcile_positions
+    complete = pm_live is not None and ks_live is not None
+    candidate = reconcile_positions(recent, pm_live=pm_live, ks_live=ks_live) if complete else []
+    positions, stale = _position_snapshot.resolve(candidate, complete=complete)
+    return {"positions": positions, "total": len(positions), "errors": errors, "stale": stale}
 
 
 @app.get("/history")
@@ -821,11 +845,10 @@ LOG_FILE = str(LOG_FILE)
 def get_log(lines: int = 80):
     """返回最近的日志行"""
     try:
-        with open(LOG_FILE) as f:
-            content = f.read()
-            all_lines = [l for l in content.splitlines() if "HTTP/1.1" not in l]
-            tail = all_lines[-lines:]
-            return {"lines": tail, "total": len(all_lines), "showing": len(tail)}
+        content = read_log(__import__("pathlib").Path(LOG_FILE))
+        all_lines = [l for l in content.splitlines() if "HTTP/1.1" not in l]
+        tail = all_lines[-lines:]
+        return {"lines": tail, "total": len(all_lines), "showing": len(tail)}
     except Exception as e:
         return {"lines": ["[日志读取失败] " + str(e)[:100]], "total": 0, "showing": 0}
 
