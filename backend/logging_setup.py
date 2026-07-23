@@ -11,22 +11,32 @@ class TeeLogger:
         self.log_file = log_path.open("a", encoding="utf-8", errors="replace", buffering=1)
         self.terminal = terminal
 
+    def _safe_terminal_write(self, value):
+        if self.terminal is None:
+            return
+        try:
+            self.terminal.write(value)
+            return
+        except Exception:
+            pass
+        # Any exception on the terminal: try replacing with '?', else give up silently.
+        encoding = getattr(self.terminal, "encoding", None) or "utf-8"
+        try:
+            safe = value.encode(encoding, errors="replace").decode(encoding, errors="replace")
+        except Exception:
+            safe = value.encode("ascii", errors="replace").decode("ascii", errors="replace")
+        try:
+            self.terminal.write(safe)
+        except Exception:
+            pass
+
     def write(self, text):
         value = str(text)
         try:
             self.log_file.write(value)
         except Exception:
             pass
-        if self.terminal is not None:
-            try:
-                self.terminal.write(value)
-            except (UnicodeEncodeError, UnicodeError):
-                encoding = getattr(self.terminal, "encoding", None) or "utf-8"
-                safe = value.encode(encoding, errors="replace").decode(encoding, errors="replace")
-                try:
-                    self.terminal.write(safe)
-                except Exception:
-                    pass
+        self._safe_terminal_write(value)
         return len(value)
 
     def flush(self):
@@ -46,7 +56,3 @@ class TeeLogger:
     @property
     def encoding(self):
         return "utf-8"
-
-
-def read_log(path: Path) -> str:
-    return path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""

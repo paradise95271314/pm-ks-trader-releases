@@ -353,7 +353,7 @@ def _loop():
             cfg = _config
             if not _enabled:
                 _current_profit_threshold = cfg["min_profit_cents"]
-                time.sleep(cfg["poll_interval"])
+                time.sleep(max(float(cfg.get("poll_interval", 0) or 0), 0.1))
                 continue
 
             now = time.time()
@@ -371,19 +371,19 @@ def _loop():
                 _save_state()
 
             if now - _last_trade_time < cfg["cooldown"]:
-                time.sleep(cfg["poll_interval"])
+                time.sleep(max(float(cfg.get("poll_interval", 0) or 0), 0.1))
                 continue
 
             # ===== 整点前后8分钟内不下单 =====
             minute = datetime.datetime.now().minute
             if minute < 8 or minute >= 52:
-                time.sleep(cfg["poll_interval"])
+                time.sleep(max(float(cfg.get("poll_interval", 0) or 0), 0.1))
                 continue
             # ==================================
 
             opp = _decide_best_opp()
             if not opp:
-                time.sleep(cfg["poll_interval"])
+                time.sleep(max(float(cfg.get("poll_interval", 0) or 0), 0.1))
                 continue
 
             print("[AutoTrade] 发现机会: %s %s cost=%.1f¢ profit=%.1f¢ ks_strike=%s" % (
@@ -391,13 +391,13 @@ def _loop():
                 opp["profit_cents"], opp["kalshi_strike"]))
 
             if not _check_balances_before_trade(opp["pm_price_cents"], opp["ks_price_cents"]):
-                time.sleep(cfg["poll_interval"])
+                time.sleep(max(float(cfg.get("poll_interval", 0) or 0), 0.1))
                 continue
 
             # 每组完整成交后计数；已有完整对冲持仓不会阻止下一组。
             coin = opp["coin"]
             if not can_trade_this_hour(coin):
-                time.sleep(cfg["poll_interval"])
+                time.sleep(max(float(cfg.get("poll_interval", 0) or 0), 0.1))
                 continue
             print("[AutoTrade] 下单参数: %s %s strike=%.0f ks_price=%.4f token_id=%s target=%.1f" % (
                 opp["coin"], opp["poly_leg"], opp["kalshi_strike"],
@@ -503,7 +503,7 @@ def _loop():
         except Exception as e:
             import traceback; print("[AutoTrade] 异常:\n" + traceback.format_exc())
 
-        time.sleep(cfg["poll_interval"])
+        time.sleep(max(float(cfg.get("poll_interval", 0) or 0), 0.1))
 
 
 _balance_thread = threading.Thread(target=_balance_refresh_loop, daemon=True)

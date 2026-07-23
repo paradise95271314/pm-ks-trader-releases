@@ -17,7 +17,7 @@ import requests
 from app_paths import DATA_DIR, ensure_data_dir
 
 
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.3.2"
 DEFAULT_MANIFEST_URL = (
     "https://raw.githubusercontent.com/"
     "paradise95271314/pm-ks-trader-releases/main/update.json"

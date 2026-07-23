@@ -1,5 +1,5 @@
 #define MyAppName "PM-KS交易桌面"
-#define MyAppVersion "1.3.1"
+#define MyAppVersion "1.3.2"
 #define MyAppExeName "PM-KS交易桌面.exe"
 
 [Setup]
