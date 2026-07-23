@@ -1,6 +1,6 @@
 {
-  "version": "1.4.4",
-  "url": "https://github.com/paradise95271314/pm-ks-trader-releases/releases/download/v1.4.4/PM-KS-Trader-Setup.exe",
-  "sha256": "c45e8ae03490fd266b1caba774eb6a09d5080f5873d2ac4231ac97693066287a",
-  "notes": "持仓对账严格按交易所实时数据，已结算仓位不再显示；API失败时标注数据待确认"
+  "version": "1.4.5",
+  "url": "https://github.com/paradise95271314/pm-ks-trader-releases/releases/download/v1.4.5/PM-KS-Trader-Setup.exe",
+  "sha256": "65c4aa39e6d947b351966fa4f87277c03520f7ea0a702b6d253867e9b710fe34",
+  "notes": "BTC行情改用Polymarket与Kalshi官方WebSocket推送；扫描和下单不再主动轮询盘口；面板500ms显示推送连接与同步差；推送断线或丢序时停止交易。"
 }
