@@ -1,6 +1,6 @@
 {
-  "version": "1.3.2",
-  "url": "https://github.com/paradise95271314/pm-ks-trader-releases/releases/download/v1.3.2/PM-KS-Trader-Setup.exe",
-  "sha256": "1c9d7125ace05f5638e378cda2b81ab6785558ea3a24dedf47a2c799ea802227",
-  "notes": "PM-KS Trader v1.3.2"
+  "version": "1.3.3",
+  "url": "https://github.com/paradise95271314/pm-ks-trader-releases/releases/download/v1.3.3/PM-KS-Trader-Setup.exe",
+  "sha256": "98f4491c9892ad520cef27a319962be4d04720ad0d82d93a7a57679c622a7edb",
+  "notes": "v1.3.3: 紧急修复 desktop_app 启动失败（补回 read_log）"
 }
