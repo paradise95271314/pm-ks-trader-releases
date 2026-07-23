@@ -56,3 +56,25 @@ class TeeLogger:
     @property
     def encoding(self):
         return "utf-8"
+
+
+def read_log(log_path: "Path | str", max_bytes: int = 5 * 1024 * 1024) -> str:
+    """Return up to ``max_bytes`` of the most recent log content.
+
+    Used by the dashboard to tail ``api.log``. Must tolerate missing files,
+    partial writes and encoding errors so the trading threads are never blocked.
+    """
+    try:
+        path = Path(log_path)
+        if not path.exists():
+            return ""
+        size = path.stat().st_size
+        with path.open("rb") as fh:
+            if size > max_bytes:
+                fh.seek(size - max_bytes)
+                # Drop the partial first line.
+                fh.readline()
+            data = fh.read()
+        return data.decode("utf-8", errors="replace")
+    except Exception:
+        return ""
