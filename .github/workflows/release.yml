@@ -1,0 +1,135 @@
+name: Build and publish Windows update
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version number, for example 1.2.1
+        required: true
+        type: string
+      notes:
+        description: Chinese update notes shown in the app
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-publish:
+    runs-on: windows-latest
+    env:
+      APP_VERSION: ${{ inputs.version }}
+      RELEASE_REPO: paradise95271314/pm-ks-trader-releases
+      RELEASE_NOTES: ${{ inputs.notes }}
+    steps:
+      - name: Check out private source
+        uses: actions/checkout@v4
+
+      - name: Validate version
+        shell: pwsh
+        run: |
+          if ($env:APP_VERSION -notmatch '^\d+\.\d+\.\d+$') {
+            throw 'Version must look like 1.2.3'
+          }
+
+      - name: Set release version
+        shell: pwsh
+        run: |
+          $path = 'backend/update_manager.py'
+          (Get-Content $path -Raw) -replace 'APP_VERSION = "[^"]+"', "APP_VERSION = `"$env:APP_VERSION`"" | Set-Content $path -Encoding utf8
+          $path = 'backend/api.py'
+          (Get-Content $path -Raw) -replace '"current_version": "[^"]+"', "`"current_version`": `"$env:APP_VERSION`"" | Set-Content $path -Encoding utf8
+          $path = 'installer.iss'
+          (Get-Content $path -Raw) -replace '#define MyAppVersion "[^"]+"', "#define MyAppVersion `"$env:APP_VERSION`"" | Set-Content $path -Encoding utf8
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install build dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r backend/requirements.txt pyinstaller
+          Push-Location frontend
+          npm ci
+          Pop-Location
+
+      - name: Build frontend
+        shell: pwsh
+        run: |
+          Push-Location frontend
+          $env:DESKTOP_BUILD = '1'
+          $env:NEXT_PUBLIC_API_URL = ''
+          npm run build
+          Pop-Location
+
+      - name: Package desktop application
+        shell: pwsh
+        run: python -m PyInstaller --noconfirm windows_app.spec
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $iscc = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) { throw 'Inno Setup 6 is missing on the GitHub runner' }
+          & $iscc installer.iss
+          if (-not (Test-Path 'output\PM-KS-Trader-Setup.exe')) { throw 'Installer was not created' }
+
+      - name: Create update manifest
+        shell: pwsh
+        run: |
+          $installer = Resolve-Path 'output\PM-KS-Trader-Setup.exe'
+          $sha = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          $downloadUrl = "https://github.com/$env:RELEASE_REPO/releases/download/v$env:APP_VERSION/PM-KS-Trader-Setup.exe"
+          $manifest = [ordered]@{
+            version = $env:APP_VERSION
+            url = $downloadUrl
+            sha256 = $sha
+            notes = $env:RELEASE_NOTES
+          }
+          $manifest | ConvertTo-Json | Set-Content 'output\update.json' -Encoding utf8
+
+      - name: Publish update.json
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+        run: |
+          git clone "https://x-access-token:$env:GH_TOKEN@github.com/$env:RELEASE_REPO.git" release-site
+          Copy-Item 'output\update.json' 'release-site\update.json' -Force
+          Push-Location release-site
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add update.json
+          git commit -m "Publish update $env:APP_VERSION"
+          git push origin HEAD:main
+          Pop-Location
+
+      - name: Publish installer to public repository
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+        run: |
+          gh release create "v$env:APP_VERSION" 'output\PM-KS-Trader-Setup.exe#PM-KS-Trader-Setup.exe' --repo $env:RELEASE_REPO --target main --title "PM-KS Trader v$env:APP_VERSION" --notes "$env:RELEASE_NOTES"
+
+      - name: Keep installer as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PM-KS-Trader-${{ inputs.version }}
+          path: |
+            output/PM-KS-Trader-Setup.exe
+            output/update.json
