@@ -1,6 +1,6 @@
 {
-  "version": "1.5.1",
-  "url": "https://github.com/paradise95271314/pm-ks-trader-releases/releases/download/v1.5.1/PM-KS-Trader-Setup.exe",
-  "sha256": "a59a6549721201f596c8360fcbe1c2d67a695131d6a0a1c7a6e906b40491ae8f",
-  "notes": "每个币种每小时最多持有1组完整对冲仓位，各币种独立，跨小时自动恢复资格；面板改为七币同框，控制区移到顶部，持仓合并显示，运行日志移到最底部。"
+  "version": "1.5.2",
+  "url": "https://github.com/paradise95271314/pm-ks-trader-releases/releases/download/v1.5.2/PM-KS-Trader-Setup.exe",
+  "sha256": "bc34e6efcc04bb6193da801735072212dafca4923f985e124002b4bc867ec0aa",
+  "notes": "紧急安全更新：真实结算发现两家价格源可能导致双边同时亏损；自动和手动真实下单已强制关闭，仅保留官方推送行情监控与订单查询。"
 }
