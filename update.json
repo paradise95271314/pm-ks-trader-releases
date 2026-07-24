@@ -1,6 +1,6 @@
 {
-  "version": "1.5.2",
-  "url": "https://github.com/paradise95271314/pm-ks-trader-releases/releases/download/v1.5.2/PM-KS-Trader-Setup.exe",
-  "sha256": "bc34e6efcc04bb6193da801735072212dafca4923f985e124002b4bc867ec0aa",
-  "notes": "紧急安全更新：真实结算发现两家价格源可能导致双边同时亏损；自动和手动真实下单已强制关闭，仅保留官方推送行情监控与订单查询。"
+  "version": "1.5.3",
+  "url": "https://github.com/paradise95271314/pm-ks-trader-releases/releases/download/v1.5.3/PM-KS-Trader-Setup.exe",
+  "sha256": "d383220191c92d7738f5b1e8e476adff3ee5e6c9b39d26da2569480585247934",
+  "notes": "结算安全更新：两家价格源可能导致双边同时亏损，自动和手动真实下单已强制关闭；新增四项结算规则指纹白名单，未验证组合在所有下单路径均会被拒绝；新增48小时Polymarket同市场完整组合模拟监控，全程不下单。"
 }
